@@ -29,7 +29,7 @@ type cacheNode struct {
 	rds            *redis.Redis
 	expiry         time.Duration
 	notFoundExpiry time.Duration
-	barrier        syncx.SharedCalls
+	barrier        syncx.SingleFlight
 	r              *rand.Rand
 	lock           *sync.Mutex
 	unstableExpiry mathx.Unstable
@@ -43,7 +43,7 @@ type cacheNode struct {
 // st is used to stat the cache.
 // errNotFound defines the error that returned on cache not found.
 // opts are the options that customize the cacheNode.
-func NewNode(rds *redis.Redis, barrier syncx.SharedCalls, st *Stat,
+func NewNode(rds *redis.Redis, barrier syncx.SingleFlight, st *Stat,
 	errNotFound error, opts ...Option) Cache {
 	o := newOptions(opts...)
 	return cacheNode{
@@ -65,9 +65,18 @@ func (c cacheNode) Del(keys ...string) error {
 		return nil
 	}
 
-	if _, err := c.rds.Del(keys...); err != nil {
-		logx.Errorf("failed to clear cache with keys: %q, error: %v", formatKeys(keys), err)
-		c.asyncRetryDelCache(keys...)
+	if len(keys) > 1 && c.rds.Type == redis.ClusterType {
+		for _, key := range keys {
+			if _, err := c.rds.Del(key); err != nil {
+				logx.Errorf("failed to clear cache with key: %q, error: %v", key, err)
+				c.asyncRetryDelCache(key)
+			}
+		}
+	} else {
+		if _, err := c.rds.Del(keys...); err != nil {
+			logx.Errorf("failed to clear cache with keys: %q, error: %v", formatKeys(keys), err)
+			c.asyncRetryDelCache(keys...)
+		}
 	}
 
 	return nil
